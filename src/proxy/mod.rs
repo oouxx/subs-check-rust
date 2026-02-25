@@ -7,7 +7,7 @@ pub struct ProxyNode {
     pub name: String,
     pub server: String,
     pub port: u16,
-    pub protocol: String,
+    pub protocol: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
     pub uuid: Option<String>,
@@ -28,12 +28,12 @@ pub struct ProxyNode {
 }
 
 impl ProxyNode {
-    pub fn new(name: String, server: String, port: u16, protocol: String) -> Self {
+    pub fn new(name: String, server: String, port: u16) -> Self {
         Self {
             name,
             server,
             port,
-            protocol,
+            protocol: None,
             username: None,
             password: None,
             uuid: None,

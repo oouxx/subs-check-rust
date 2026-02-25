@@ -1,11 +1,20 @@
 use anyhow::Result;
 use check::{CheckResult, ProxyChecker};
 use clap::Parser;
+use clash_lib::{
+    app::outbound::OutboundManager,
+    config::{Config, Options},
+    proxy::{AnyOutboundHandler, OutboundProxy},
+};
 use config::Config;
 use proxy::ProxyNode;
+use serde_yaml;
+use serde_yaml::Value;
+use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
+use tokio;
 use ui::progress::ProgressTracker;
-
 mod check;
 mod config;
 mod proxy;
@@ -78,38 +87,53 @@ struct Args {
 
 fn create_sample_proxies() -> Vec<ProxyNode> {
     vec![
-        ProxyNode::new(
-            "本地代理 1".to_string(),
-            "127.0.0.1".to_string(),
-            7890,
-            "http".to_string(),
-        ),
-        ProxyNode::new(
-            "本地代理 2".to_string(),
-            "127.0.0.1".to_string(),
-            7891,
-            "http".to_string(),
-        ),
-        ProxyNode::new(
-            "本地代理 3".to_string(),
-            "127.0.0.1".to_string(),
-            7892,
-            "http".to_string(),
-        ),
-        ProxyNode::new(
-            "SSH 隧道".to_string(),
-            "localhost".to_string(),
-            1080,
-            "socks5".to_string(),
-        ),
-        ProxyNode::new(
-            "VMess 节点".to_string(),
-            "example.com".to_string(),
-            443,
-            "vmess".to_string(),
-        )
-        .with_uuid("12345678-1234-1234-1234-123456789012".to_string()),
+        ProxyNode::new("本地代理 1".to_string(), "127.0.0.1".to_string(), 7890),
+        ProxyNode::new("本地代理 2".to_string(), "127.0.0.1".to_string(), 7891),
+        ProxyNode::new("本地代理 3".to_string(), "127.0.0.1".to_string(), 7892),
+        ProxyNode::new("SSH 隧道".to_string(), "localhost".to_string(), 1080),
+        ProxyNode::new("VMess 节点".to_string(), "example.com".to_string(), 443)
+            .with_uuid("12345678-1234-1234-1234-123456789012".to_string()),
     ]
+}
+
+fn read_sample_proxies() -> Vec<ProxyNode> {
+    // 读取文件
+    let content = match fs::read_to_string("sample.yaml") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Failed to read sample.yaml: {}", e);
+            return vec![];
+        }
+    };
+
+    // 先解析成通用 YAML Value
+    let yaml: Value = match serde_yaml::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Failed to parse YAML: {}", e);
+            return vec![];
+        }
+    };
+
+    // 获取 "proxies" key
+    let proxies_value = match yaml.get("proxies") {
+        Some(v) => v,
+        None => {
+            eprintln!("No 'proxies' key found in YAML");
+            return vec![];
+        }
+    };
+
+    // 反序列化成 Vec<ProxyNode>
+    let proxies: Vec<ProxyNode> = match serde_yaml::from_value(proxies_value.clone()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Failed to parse 'proxies': {}", e);
+            return vec![];
+        }
+    };
+
+    proxies
 }
 
 fn print_results(results: &[CheckResult]) {
@@ -379,7 +403,7 @@ async fn main() -> Result<()> {
 
     // 获取代理列表（这里使用示例数据）
     println!("\n📡 获取代理节点...");
-    let mut proxies = create_sample_proxies();
+    let mut proxies = read_sample_proxies();
     println!("✅ 获取到 {} 个代理节点", proxies.len());
 
     // 智能乱序（模拟原项目的功能）
@@ -420,6 +444,37 @@ async fn main() -> Result<()> {
     }
 
     println!("\n🎉 检测完成!");
+
+    Ok(())
+}
+
+async fn use_clash_rs() -> Result<()> {
+    // 1. 加载代理配置文件（Clash 标准 YAML）
+    let config_path = PathBuf::from("./sample.yaml"); // 你的代理配置文件路径
+    let config = Config::File(config_path.to_string_lossy().to_string()).try_parse()?;
+
+    // 2. 初始化出站管理器（核心：管理所有代理节点）
+    let outbound_manager = OutboundManager::new(
+        config.proxies.unwrap_or_default(),         // 代理节点列表
+        config.proxy_groups.unwrap_or_default(),    // 代理组（可选）
+        config.proxy_providers.unwrap_or_default(), // 代理提供商（可选）
+        None,                                       // DNS 解析器（按需初始化）
+        None,                                       // 出站接口（可选）
+    )
+    .await?;
+
+    // 3. 获取所有代理节点的处理器
+    let all_proxies: Vec<AnyOutboundHandler> = outbound_manager.get_proxies().await;
+
+    // 4. 遍历 & 使用代理节点
+    for proxy in all_proxies {
+        println!("代理名称: {}", proxy.name());
+        println!("代理类型: {:?}", proxy.proto()); // 输出：OutboundType::Ss / Vmess / Trojan 等
+
+        // 示例：验证代理是否可用（可选）
+        let is_available = proxy.health_check().await?;
+        println!("代理 {} 可用性: {}", proxy.name(), is_available);
+    }
 
     Ok(())
 }
