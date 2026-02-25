@@ -1,0 +1,106 @@
+# Rust 代理检测工具配置示例
+
+# -----------进度显示-----------
+# 是否显示检测进度（终端）
+print_progress: true
+# 进度条显示模式:
+# "auto": 根据测活-测速-媒体检测的阶段权重自动显示
+# "stage": 每个阶段完成,显示下一阶段剩余任务
+progress_mode: "auto"
+
+# -----------计划任务-----------
+# 检查间隔(分钟)
+check_interval: 720
+
+# -----------检测参数-----------
+# 流水线任务并发数
+alive_concurrent: 10
+speed_concurrent: 4
+media_concurrent: 10
+
+# 是否启用IPv6，默认禁用
+ipv6: false
+
+# 超时时间(毫秒)(节点的最大延迟)
+timeout: 6000
+
+# 并发线程数
+concurrent: 20
+
+# 保存几个成功的节点，为0代表不限制
+success_limit: 200
+
+# 保留之前测试成功的节点
+keep_success_proxies: true
+
+# -----------下载参数-----------
+# 最低测速结果舍弃(KB/s)
+min_speed: 128.0
+# 下载测试时间(s)
+download_timeout: 10
+# 单节点测速下载数据大小(MB)限制，0为不限
+download_mb: 20
+# 总下载速度速度限制(MB/s)，0为不限
+total_speed_limit: 0
+
+# 测速地址
+speed_test_url: "https://github.com/2dust/v2rayN/releases/download/7.16.2/v2rayN-windows-64-SelfContained.zip"
+
+# 相似度阈值(Threshold)大致对应网段
+# 1.00 /32（完全相同 IP）
+# 0.75 /24（前三段相同）
+# 0.50 /16（前两段相同）
+# 0.25 /8（第一段相同）
+threshold: 0.75
+
+# -----------媒体解锁检测-----------
+# 是否启用媒体解锁检测
+media_check: true
+
+# -----------订阅配置-----------
+# 订阅链接列表
+subscriptions:
+  - name: "示例订阅1"
+    url: "https://example.com/subscription1"
+    enabled: true
+
+  - name: "示例订阅2"
+    url: "https://example.com/subscription2"
+    enabled: true
+
+# -----------输出配置-----------
+# 输出目录
+output_dir: "./output"
+
+# 输出格式: "json", "yaml", "both"
+output_format: "both"
+
+# 是否生成 Clash 配置文件
+generate_clash_config: true
+
+# 是否生成 Sing-box 配置文件
+generate_singbox_config: true
+
+# -----------日志配置-----------
+# 日志级别: "error", "warn", "info", "debug", "trace"
+log_level: "info"
+
+# 日志文件路径，留空则只输出到控制台
+log_file: ""
+
+# -----------代理配置-----------
+# 系统代理设置
+system_proxy: ""
+
+# GitHub 代理
+github_proxy: ""
+
+# -----------高级配置-----------
+# 是否丢弃无法访问 Cloudflare 的节点
+drop_bad_cf_nodes: false
+
+# 是否启用订阅链接统计
+sub_urls_stats: true
+
+# GC 阈值
+gc_threshold: 5000
