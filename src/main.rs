@@ -1,10 +1,30 @@
 use anyhow::Result;
 use check::{CheckResult, ProxyChecker};
 use clap::Parser;
+// 修正后可直接编译的引用
 use clash_lib::{
-    app::outbound::OutboundManager,
+    Options, // 启动参数（根模块）
+    // OutboundManager 需包含 manager 子模块
+    app::outbound::manager::OutboundManager,
+    // 线程安全版本（更常用）
+    // app::outbound::manager::ThreadSafeOutboundManager,
+
+    // 配置相关（根据实际用途选择）
+    config::Config, // 核心配置解析
+    // proxy::options::HandlerCommonOptions, // 代理处理器通用配置
+
+    // 出站代理相关
+    proxy::{AnyOutboundHandler, OutboundHandler}, // 替换 OutboundProxy 为 OutboundHandler
+};
+
+use anyhow::{Result, anyhow};
+use clash_lib::{
+    app::dns::DNSResolver,
+    app::outbound::manager::{OutboundManager, ThreadSafeOutboundManager},
+    common::http::client::new_http_client,
     config::{Config, Options},
-    proxy::{AnyOutboundHandler, OutboundProxy},
+    proxy::utils::healthcheck::HealthCheckResult,
+    proxy::{AnyOutboundHandler, OutboundType},
 };
 use config::Config;
 use proxy::ProxyNode;
@@ -13,6 +33,8 @@ use serde_yaml::Value;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
+use tokio;
 use tokio;
 use ui::progress::ProgressTracker;
 mod check;
@@ -449,31 +471,84 @@ async fn main() -> Result<()> {
 }
 
 async fn use_clash_rs() -> Result<()> {
-    // 1. 加载代理配置文件（Clash 标准 YAML）
-    let config_path = PathBuf::from("./sample.yaml"); // 你的代理配置文件路径
-    let config = Config::File(config_path.to_string_lossy().to_string()).try_parse()?;
+    // 1. 初始化 Clash 启动参数（加载配置文件）
+    let config_path = PathBuf::from("./sample.yaml");
+    if !config_path.exists() {
+        return Err(anyhow!("配置文件不存在: {:?}", config_path));
+    }
 
-    // 2. 初始化出站管理器（核心：管理所有代理节点）
+    // 构建启动 Options（与 clash-rs 测试代码保持一致）
+    let options = Options {
+        config: Config::File(config_path.to_string_lossy().to_string()),
+        cwd: Some(std::env::current_dir()?.to_string_lossy().to_string()),
+        rt: None,
+        log_file: None,
+    };
+
+    // 解析配置（clash-rs 内部通过 Options 解析完整配置）
+    let resolved_config = options.resolve_config().await?;
+
+    // 2. 初始化依赖组件（DNS 解析器、HTTP 客户端等）
+    // 初始化 DNS 解析器（OutboundManager 必需）
+    let dns_resolver = DNSResolver::new(&resolved_config.dns, None)
+        .await
+        .map_err(|e| anyhow!("DNS 解析器初始化失败: {}", e))?;
+    let dns_resolver = Arc::new(dns_resolver);
+
+    // 初始化 HTTP 客户端（健康检查必需）
+    let http_client = new_http_client(dns_resolver.clone(), None)?;
+
+    // 3. 初始化出站管理器（核心：管理所有代理节点）
     let outbound_manager = OutboundManager::new(
-        config.proxies.unwrap_or_default(),         // 代理节点列表
-        config.proxy_groups.unwrap_or_default(),    // 代理组（可选）
-        config.proxy_providers.unwrap_or_default(), // 代理提供商（可选）
-        None,                                       // DNS 解析器（按需初始化）
-        None,                                       // 出站接口（可选）
+        resolved_config.proxies.unwrap_or_default(),
+        resolved_config.proxy_groups.unwrap_or_default(),
+        resolved_config.proxy_providers.unwrap_or_default(),
+        Some(dns_resolver),
+        resolved_config.interface.clone(),
+        http_client,
     )
-    .await?;
+    .await
+    .map_err(|e| anyhow!("OutboundManager 初始化失败: {}", e))?;
 
-    // 3. 获取所有代理节点的处理器
-    let all_proxies: Vec<AnyOutboundHandler> = outbound_manager.get_proxies().await;
+    // 包装为线程安全版本（clash-rs 标准用法）
+    let outbound_manager: ThreadSafeOutboundManager =
+        Arc::new(tokio::sync::RwLock::new(outbound_manager));
 
-    // 4. 遍历 & 使用代理节点
+    // 4. 获取所有代理节点的处理器
+    let all_proxies: Vec<AnyOutboundHandler> = outbound_manager.read().await.get_proxies().await;
+    if all_proxies.is_empty() {
+        return Err(anyhow!("配置中未找到任何代理节点"));
+    }
+
+    // 5. 遍历 & 使用代理节点
     for proxy in all_proxies {
+        println!("\n=== 代理信息 ===");
         println!("代理名称: {}", proxy.name());
-        println!("代理类型: {:?}", proxy.proto()); // 输出：OutboundType::Ss / Vmess / Trojan 等
+        println!("代理类型: {:?}", proxy.proto()); // 输出：Ss / Vmess / Socks5 等
 
-        // 示例：验证代理是否可用（可选）
-        let is_available = proxy.health_check().await?;
-        println!("代理 {} 可用性: {}", proxy.name(), is_available);
+        // 示例1：检查 UDP 支持
+        let support_udp = proxy.support_udp().await;
+        println!("支持 UDP: {}", support_udp);
+
+        // 示例2：健康检查（URL 测试，clash-rs 标准健康检查方式）
+        let health_check_url = "http://www.gstatic.com/generate_204"; // 通用健康检查 URL
+        let timeout = std::time::Duration::from_secs(5);
+
+        let check_result: HealthCheckResult = outbound_manager
+            .read()
+            .await
+            .url_test(&[proxy.clone()], health_check_url, timeout)
+            .await
+            .into_iter()
+            .next()
+            .ok_or(anyhow!("健康检查无结果"))??;
+
+        println!(
+            "代理 {} 延迟: {}ms (可用性: {})",
+            proxy.name(),
+            check_result.actual.as_millis(),
+            check_result.actual.as_millis() < 5000 // 延迟 <5s 视为可用
+        );
     }
 
     Ok(())

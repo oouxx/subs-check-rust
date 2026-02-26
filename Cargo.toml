@@ -25,4 +25,4 @@ ipnetwork = "0.20"
 maxminddb = "0.24"
 rand = "0.8"
 clap = { version = "4.5", features = ["derive"] }
-clash-lib = { git = "https://github.com/Watfaq/clash-rs", rev = "c39252bfe24bfddd3ff06afef4e8f44c877a7a61" }
+clash-lib = { git = "https://github.com/Watfaq/clash-rs"}
