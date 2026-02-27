@@ -1,5 +1,5 @@
 //! Clash 代理管理器核心逻辑
-//! 使用 clash-lib 实现真实的代理健康检查
+//! 实现代理健康检查和管理功能
 
 use super::health_check::{check_proxies_health, check_proxies_health_with_config};
 use super::types::ProxyNodeInfo;
@@ -41,7 +41,7 @@ impl ClashProxyManager {
         // 4. 提取代理节点信息
         let proxies = Self::extract_proxies_from_yaml(&yaml)?;
 
-        // 5. 执行真实的健康检查（使用 clash-lib）
+        // 5. 执行健康检查
         let checked_proxies = Self::check_proxies_health(&proxies).await;
 
         Ok(Self {
@@ -129,7 +129,7 @@ impl ClashProxyManager {
         Ok(proxies)
     }
 
-    /// 执行真实的健康检查（使用 clash-lib）
+    /// 执行健康检查
     async fn check_proxies_health(proxies: &[ProxyNodeInfo]) -> Vec<ProxyNodeInfo> {
         // 使用默认配置进行健康检查
         check_proxies_health(proxies).await

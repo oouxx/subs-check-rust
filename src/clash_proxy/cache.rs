@@ -1,5 +1,5 @@
 //! 简化缓存实现
-//! 由于 clash-rs 的缓存实现较为复杂，这里提供简化版本
+//! 提供基本的缓存功能
 
 use std::sync::Arc;
 use tokio::sync::RwLock;

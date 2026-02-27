@@ -26,8 +26,15 @@ maxminddb = "0.24"
 rand = "0.8"
 clap = { version = "4.5", features = ["derive"] }
 async-trait = "0.1"
-clash-lib = { git = "https://github.com/Watfaq/clash-rs"}
-# clash-lib = { path = "../clash-rs/clash-lib"  }
+
+
+# HTTP 客户端和代理支持
+hyper = { version = "1.0", features = ["client", "http1", "http2", "server"] }
+hyper-tls = "0.6"
+hyper-proxy = "0.9"
+hyper-util = { version = "0.1", features = ["client"] }
+base64 = "0.22"
+urlencoding = "2.1"
 
 [profile.dev]
 incremental = true  # 开启 debug 模式增量编译
