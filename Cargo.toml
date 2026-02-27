@@ -25,4 +25,13 @@ ipnetwork = "0.20"
 maxminddb = "0.24"
 rand = "0.8"
 clap = { version = "4.5", features = ["derive"] }
+async-trait = "0.1"
 clash-lib = { git = "https://github.com/Watfaq/clash-rs"}
+# clash-lib = { path = "../clash-rs/clash-lib"  }
+
+[profile.dev]
+incremental = true  # 开启 debug 模式增量编译
+overflow-checks = false  # 关闭溢出检查（仅开发环境，生产环境需开启）
+
+[profile.release]
+incremental = true  # 可选：开启 release 模式增量编译

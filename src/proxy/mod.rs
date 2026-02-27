@@ -66,15 +66,16 @@ impl ProxyNode {
     }
 
     pub fn to_proxy_url(&self) -> String {
+        let protocol = self.protocol.as_deref().unwrap_or("socks5");
         match (&self.username, &self.password) {
             (Some(username), Some(password)) => {
                 format!(
                     "{}://{}:{}@{}:{}",
-                    self.protocol, username, password, self.server, self.port
+                    protocol, username, password, self.server, self.port
                 )
             }
             _ => {
-                format!("{}://{}:{}", self.protocol, self.server, self.port)
+                format!("{}://{}:{}", protocol, self.server, self.port)
             }
         }
     }
@@ -162,7 +163,8 @@ pub fn validate_proxy_node(proxy: &ProxyNode) -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("端口号不能为0"));
     }
 
-    if proxy.protocol.is_empty() {
+    let protocol = proxy.protocol.as_deref().unwrap_or("");
+    if protocol.is_empty() {
         return Err(anyhow::anyhow!("协议不能为空"));
     }
 
@@ -171,8 +173,8 @@ pub fn validate_proxy_node(proxy: &ProxyNode) -> anyhow::Result<()> {
         "http", "https", "socks5", "socks5h", "ss", "ssr", "vmess", "vless", "trojan", "hysteria",
     ];
 
-    if !supported_protocols.contains(&proxy.protocol.as_str()) {
-        return Err(anyhow::anyhow!("不支持的协议: {}", proxy.protocol));
+    if !supported_protocols.contains(&protocol) {
+        return Err(anyhow::anyhow!("不支持的协议: {}", protocol));
     }
 
     Ok(())

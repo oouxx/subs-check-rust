@@ -1,0 +1,32 @@
+proxies:
+  - encryption: none
+    name: 🇸🇬SG¹-US⁰_1|5%|GPT⁺|GM|YT|X|History
+    network: ws
+    port: 80
+    server: 104.18.37.104
+    type: vless
+    udp: true
+    uuid: 69d38faa-21a1-4d18-82cb-796a942c181b
+    ws-opts:
+      headers:
+        Host: sfsl.ardomains1.dpdns.org
+        User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/55.0.2883.87 Safari/537.36
+      path: /?ed=2048
+    xudp: true
+  - client-fingerprint: chrome
+    encryption: none
+    name: 🇺🇸US⁻¹_1|GM|YT|TK|History
+    network: ws
+    port: 2096
+    server: 208.103.161.249
+    servername: cf.afrcloudnet1.dpdns.org
+    tls: true
+    type: vless
+    udp: true
+    uuid: Telegram🇨🇳 @WangCai2
+    ws-opts:
+      headers:
+        Host: cf.afrcloudnet1.dpdns.org
+        User-Agent: Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/46.0.2490.80 Safari/537.36
+      path: /?ed=2560&Telegram🇨🇳 @WangCai2
+    xudp: true
