@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use url::Url;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+pub mod parser;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProxyNode {
     pub name: String,
     pub server: String,

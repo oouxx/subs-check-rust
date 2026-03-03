@@ -1,5 +1,7 @@
+cargo-features = ["profile-rustflags"]
+
 [package]
-name = "rust-hello"
+name = "subs-check-rust"
 version = "0.1.0"
 edition = "2024"
 
@@ -36,9 +38,16 @@ hyper-util = { version = "0.1", features = ["client"] }
 base64 = "0.22"
 urlencoding = "2.1"
 
+# 测试依赖
+tempfile = "3.10"
+subconverter = "0.2.34"
+
+
 [profile.dev]
 incremental = true  # 开启 debug 模式增量编译
 overflow-checks = false  # 关闭溢出检查（仅开发环境，生产环境需开启）
-
+rustflags = ["-C", "link-arg=-s"]  # -s 表示 strip 符号，减少导出项
+[zdprofile.test]
+rustflags = ["-C", "link-arg=-s"]  # 测试环境同样生效
 [profile.release]
 incremental = true  # 可选：开启 release 模式增量编译

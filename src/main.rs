@@ -1,8 +1,9 @@
 use anyhow::Result;
 use check::{CheckResult, ProxyChecker};
 use clap::Parser;
-use config::Config;
+use config::{Config, Subscription};
 use proxy::ProxyNode;
+use regex;
 use serde_yaml;
 use serde_yaml::Value;
 use std::fs;
@@ -122,6 +123,218 @@ fn read_sample_proxies() -> Vec<ProxyNode> {
     };
 
     proxies
+}
+
+async fn fetch_proxies_from_subscriptions(subscriptions: &[Subscription]) -> Vec<ProxyNode> {
+    use base64::Engine;
+    use base64::engine::general_purpose;
+    use reqwest::Client;
+    // use url::Url; // 暂时不需要
+
+    let mut all_proxies = Vec::new();
+    let client = Client::new();
+
+    for subscription in subscriptions {
+        if !subscription.enabled {
+            continue;
+        }
+
+        println!("📡 获取订阅: {} ({})", subscription.name, subscription.url);
+
+        match client.get(&subscription.url).send().await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    match response.text().await {
+                        Ok(content) => {
+                            // 尝试解码base64内容
+                            let decoded_content = match general_purpose::STANDARD.decode(&content) {
+                                Ok(decoded) => String::from_utf8_lossy(&decoded).to_string(),
+                                Err(_) => content, // 如果不是base64，直接使用原内容
+                            };
+
+                            // 先尝试解析为YAML（Clash配置文件格式）
+                            match serde_yaml::from_str::<Value>(&decoded_content) {
+                                Ok(yaml) => {
+                                    if let Some(proxies_value) = yaml.get("proxies") {
+                                        match serde_yaml::from_value::<Vec<ProxyNode>>(
+                                            proxies_value.clone(),
+                                        ) {
+                                            Ok(proxies) => {
+                                                println!(
+                                                    "✅ 从订阅 {} 获取到 {} 个代理节点 (Clash格式)",
+                                                    subscription.name,
+                                                    proxies.len()
+                                                );
+                                                all_proxies.extend(proxies);
+                                            }
+                                            Err(e) => {
+                                                println!(
+                                                    "⚠️  解析订阅 {} 的代理节点失败: {}",
+                                                    subscription.name, e
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        // 如果没有找到proxies字段，尝试解析为代理分享链接格式
+                                        println!("🔄 尝试解析为代理分享链接格式...");
+                                        parse_proxy_links(
+                                            &decoded_content,
+                                            &mut all_proxies,
+                                            &subscription.name,
+                                        );
+                                    }
+                                }
+                                Err(_) => {
+                                    // 如果不是YAML格式，尝试解析为代理分享链接格式
+                                    println!("🔄 尝试解析为代理分享链接格式...");
+                                    parse_proxy_links(
+                                        &decoded_content,
+                                        &mut all_proxies,
+                                        &subscription.name,
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("⚠️  读取订阅 {} 内容失败: {}", subscription.name, e);
+                        }
+                    }
+                } else {
+                    println!(
+                        "⚠️  订阅 {} 请求失败: {}",
+                        subscription.name,
+                        response.status()
+                    );
+                }
+            }
+            Err(e) => {
+                println!("⚠️  获取订阅 {} 失败: {}", subscription.name, e);
+            }
+        }
+    }
+
+    all_proxies
+}
+
+fn parse_proxy_links(content: &str, all_proxies: &mut Vec<ProxyNode>, subscription_name: &str) {
+    let mut count = 0;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // 尝试解析为代理链接
+        if let Ok(proxy_node) = parse_proxy_link(line) {
+            all_proxies.push(proxy_node);
+            count += 1;
+        }
+    }
+
+    if count > 0 {
+        println!(
+            "✅ 从订阅 {} 解析到 {} 个代理节点 (分享链接格式)",
+            subscription_name, count
+        );
+    } else {
+        println!("⚠️  订阅 {} 中没有找到有效的代理链接", subscription_name);
+    }
+}
+
+fn parse_proxy_link(link: &str) -> anyhow::Result<ProxyNode> {
+    // 使用新的解析器解析代理链接
+    match proxy::parser::parse_proxy_link(link) {
+        Ok(parsed) => {
+            // 转换为ProxyNode
+            Ok(proxy::parser::to_proxy_node(parsed))
+        }
+        Err(e) => {
+            // 如果解析失败，回退到简单解析
+            println!("⚠️  代理链接解析失败: {} - {}", link, e);
+
+            // 提取名称（如果有的话）
+            let name = if let Some(pos) = link.find('#') {
+                // 提取#后面的部分作为名称
+                let name_part = &link[pos + 1..];
+                // 解码URL编码的名称
+                urlencoding::decode(name_part)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|_| name_part.to_string())
+            } else {
+                // 如果没有名称，使用链接的一部分作为名称
+                let truncated = if link.len() > 30 { &link[..30] } else { link };
+                format!("代理-{}", truncated)
+            };
+
+            // 尝试提取服务器和端口
+            let (server, port) = extract_server_port(link);
+
+            // 尝试猜测协议
+            let protocol = guess_protocol(link);
+
+            Ok(ProxyNode {
+                name,
+                server,
+                port,
+                protocol: Some(protocol),
+                ..Default::default()
+            })
+        }
+    }
+}
+
+/// 从链接中提取服务器和端口
+fn extract_server_port(link: &str) -> (String, u16) {
+    // 尝试匹配 IP:PORT 或 域名:PORT 格式
+    if let Ok(re) = regex::Regex::new(r"([a-zA-Z0-9\.\-]+):(\d+)") {
+        if let Some(caps) = re.captures(link) {
+            if let Ok(port) = caps[2].parse::<u16>() {
+                return (caps[1].to_string(), port);
+            }
+        }
+    }
+
+    // 尝试从URL中提取
+    if let Ok(url) = url::Url::parse(link) {
+        if let Some(host) = url.host_str() {
+            let port = url.port().unwrap_or(0);
+            return (host.to_string(), port);
+        }
+    }
+
+    ("unknown".to_string(), 0)
+}
+
+/// 根据链接猜测协议类型
+fn guess_protocol(link: &str) -> String {
+    let link_lower = link.to_lowercase();
+
+    if link_lower.contains("vmess://") {
+        "vmess".to_string()
+    } else if link_lower.contains("vless://") {
+        "vless".to_string()
+    } else if link_lower.contains("trojan://") {
+        "trojan".to_string()
+    } else if link_lower.contains("ss://") {
+        "ss".to_string()
+    } else if link_lower.contains("ssr://") {
+        "ssr".to_string()
+    } else if link_lower.contains("hysteria://") {
+        "hysteria".to_string()
+    } else if link_lower.contains("hysteria2://") {
+        "hysteria2".to_string()
+    } else if link_lower.contains("http://") {
+        "http".to_string()
+    } else if link_lower.contains("https://") {
+        "https".to_string()
+    } else if link_lower.contains("socks5://") {
+        "socks5".to_string()
+    } else if link_lower.contains("socks4://") {
+        "socks4".to_string()
+    } else {
+        "unknown".to_string()
+    }
 }
 
 fn print_results(results: &[CheckResult]) {
@@ -254,6 +467,7 @@ fn print_summary(results: &[CheckResult]) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // 运行clash_proxy测试
     if let Err(e) = clash_proxy_test().await {
         eprintln!("错误: {:#}", e);
         std::process::exit(1);
@@ -394,9 +608,21 @@ async fn main() -> Result<()> {
     let config_clone = config.clone();
     let checker = ProxyChecker::new(config_clone);
 
-    // 获取代理列表（这里使用示例数据）
+    // 获取代理列表
     println!("\n📡 获取代理节点...");
-    let mut proxies = read_sample_proxies();
+    let mut proxies = if !config.subscriptions.is_empty() {
+        // 从订阅链接获取代理节点
+        fetch_proxies_from_subscriptions(&config.subscriptions).await
+    } else {
+        // 如果没有订阅链接，使用示例数据
+        read_sample_proxies()
+    };
+
+    if proxies.is_empty() {
+        println!("⚠️  没有获取到任何代理节点，使用示例数据");
+        proxies = read_sample_proxies();
+    }
+
     println!("✅ 获取到 {} 个代理节点", proxies.len());
 
     // 智能乱序（模拟原项目的功能）

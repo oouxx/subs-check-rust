@@ -60,12 +60,12 @@ media_check: true
 # -----------订阅配置-----------
 # 订阅链接列表
 subscriptions:
-  - name: "示例订阅1"
-    url: "https://example.com/subscription1"
+  - name: "ccpthisbigdog"
+    url: "https://raw.githubusercontent.com/ccpthisbigdog/freedomchina/refs/heads/main/subdom.txt"
     enabled: true
 
-  - name: "示例订阅2"
-    url: "https://example.com/subscription2"
+  - name: "ts-sf"
+    url: "https://raw.githubusercontent.com/ts-sf/fly/main/v2"
     enabled: true
 
 # -----------输出配置-----------

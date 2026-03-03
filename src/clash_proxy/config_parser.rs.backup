@@ -1,0 +1,1118 @@
+//! 基于clash-rs理念的代理配置解析器
+//!
+//! 提供完整的代理配置解析功能，支持：
+//! - Clash YAML配置文件解析
+//! - 多种代理协议配置
+//! - 代理组配置
+//! - 健康检查配置
+//! - 订阅链接解析
+
+use anyhow::{Context, Result, anyhow};
+use serde::{Deserialize, Serialize};
+use serde_yaml::{self, Value};
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+use url::Url;
+
+use super::types::ProxyNodeInfo;
+
+/// Clash配置结构
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClashConfig {
+    /// 代理配置列表
+    #[serde(rename = "proxies")]
+    pub proxies: Option<Vec<HashMap<String, Value>>>,
+
+    /// 代理组配置
+    #[serde(rename = "proxy-groups")]
+    pub proxy_groups: Option<Vec<HashMap<String, Value>>>,
+
+    /// 代理提供者配置
+    #[serde(rename = "proxy-providers")]
+    pub proxy_providers: Option<HashMap<String, HashMap<String, Value>>>,
+
+    /// 规则配置
+    #[serde(rename = "rules")]
+    pub rules: Option<Vec<String>>,
+
+    /// 端口配置
+    pub port: Option<u16>,
+
+    /// SOCKS5端口配置
+    pub socks_port: Option<u16>,
+
+    /// 混合端口配置
+    pub mixed_port: Option<u16>,
+
+    /// 运行模式
+    pub mode: Option<String>,
+
+    /// 日志级别
+    pub log_level: Option<String>,
+
+    /// DNS配置
+    pub dns: Option<DnsConfig>,
+
+    /// 实验性功能配置
+    pub experimental: Option<HashMap<String, Value>>,
+
+    /// 其他配置项
+    #[serde(flatten)]
+    pub other: HashMap<String, Value>,
+}
+
+/// DNS配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsConfig {
+    /// 是否启用DNS
+    pub enable: Option<bool>,
+
+    /// 是否支持IPv6
+    pub ipv6: Option<bool>,
+
+    /// 增强模式
+    pub enhanced_mode: Option<String>,
+
+    /// 名称服务器列表
+    pub nameserver: Option<Vec<String>>,
+
+    /// 备用名称服务器列表
+    pub fallback: Option<Vec<String>>,
+
+    /// 监听配置
+    pub listen: Option<String>,
+
+    /// 默认名称服务器
+    pub default_nameserver: Option<Vec<String>>,
+
+    /// 其他DNS配置项
+    #[serde(flatten)]
+    pub other: HashMap<String, Value>,
+}
+
+/// 代理组类型
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProxyGroupType {
+    /// 选择器类型
+    Select,
+
+    /// URL测试类型
+    #[serde(rename = "url-test")]
+    UrlTest,
+
+    /// 故障转移类型
+    Fallback,
+
+    /// 负载均衡类型
+    #[serde(rename = "load-balance")]
+    LoadBalance,
+
+    /// 中继类型
+    Relay,
+
+    /// 其他类型
+    Other(String),
+}
+
+/// 代理组配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyGroup {
+    /// 组名称
+    pub name: String,
+
+    /// 组类型
+    #[serde(rename = "type")]
+    pub group_type: ProxyGroupType,
+
+    /// 包含的代理列表
+    pub proxies: Vec<String>,
+
+    /// URL测试地址（仅对url-test类型有效）
+    pub url: Option<String>,
+
+    /// 测试间隔（秒，仅对url-test类型有效）
+    pub interval: Option<u64>,
+
+    /// 策略（仅对load-balance类型有效）
+    pub strategy: Option<String>,
+
+    /// 使用的代理提供者
+    pub r#use: Option<Vec<String>>,
+
+    /// 其他配置项
+    #[serde(flatten)]
+    pub other: HashMap<String, Value>,
+}
+
+/// 代理提供者配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyProvider {
+    /// 提供者类型
+    #[serde(rename = "type")]
+    pub provider_type: String,
+
+    /// 文件路径（对file类型）
+    pub path: Option<String>,
+
+    /// URL地址（对http类型）
+    pub url: Option<String>,
+
+    /// 更新间隔（秒）
+    pub interval: Option<u64>,
+
+    /// 健康检查配置
+    pub health_check: Option<HealthCheckConfig>,
+
+    /// 其他配置项
+    #[serde(flatten)]
+    pub other: HashMap<String, Value>,
+}
+
+/// 健康检查配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthCheckConfig {
+    /// 是否启用健康检查
+    pub enable: Option<bool>,
+
+    /// 测试URL
+    pub url: Option<String>,
+
+    /// 测试间隔（秒）
+    pub interval: Option<u64>,
+
+    /// 是否懒检查
+    pub lazy: Option<bool>,
+
+    /// 其他配置项
+    #[serde(flatten)]
+    pub other: HashMap<String, Value>,
+}
+
+/// 代理配置解析器
+#[derive(Debug, Clone)]
+pub struct ConfigParser {
+    /// 配置目录
+    config_dir: Option<String>,
+}
+
+impl ConfigParser {
+    /// 创建新的配置解析器
+    pub fn new(config_dir: Option<&str>) -> Self {
+        Self {
+            config_dir: config_dir.map(|s| s.to_string()),
+        }
+    }
+
+    /// 从文件解析Clash配置
+    pub fn parse_clash_config_file(&self, path: &str) -> Result<ClashConfig> {
+        let full_path = if let Some(dir) = &self.config_dir {
+            Path::new(dir).join(path).to_string_lossy().to_string()
+        } else {
+            path.to_string()
+        };
+
+        let content = fs::read_to_string(&full_path)
+            .with_context(|| format!("无法读取配置文件: {}", full_path))?;
+
+        self.parse_clash_config(&content)
+    }
+
+    /// 从字符串解析Clash配置
+    pub fn parse_clash_config(&self, content: &str) -> Result<ClashConfig> {
+        let config: ClashConfig =
+            serde_yaml::from_str(content).with_context(|| "解析Clash配置失败")?;
+
+        Ok(config)
+    }
+
+    /// 从Clash配置提取代理节点信息
+    pub fn extract_proxy_nodes(&self, config: &ClashConfig) -> Result<Vec<ProxyNodeInfo>> {
+        let mut proxies = Vec::new();
+
+        if let Some(proxy_list) = &config.proxies {
+            for proxy_config in proxy_list {
+                if let Some(proxy) = self.parse_proxy_config(proxy_config) {
+                    proxies.push(proxy);
+                }
+            }
+        }
+
+        // 从代理提供者提取代理
+        if let Some(providers) = &config.proxy_providers {
+            for (provider_name, provider_config) in providers {
+                if let Some(provider_proxies) =
+                    self.parse_provider_proxies(provider_name, provider_config)
+                {
+                    proxies.extend(provider_proxies);
+                }
+            }
+        }
+
+        Ok(proxies)
+    }
+
+    /// 解析单个代理配置
+    fn parse_proxy_config(&self, config: &HashMap<String, Value>) -> Option<ProxyNodeInfo> {
+        // 获取代理类型
+        let proxy_type = config.get("type")?.as_str()?.to_string();
+
+        // 获取代理名称
+        let name = config.get("name")?.as_str()?.to_string();
+
+        // 获取服务器地址和端口
+        let server = config.get("server")?.as_str()?.to_string();
+        let port = config.get("port")?.as_u64()? as u16;
+
+        // 创建基础代理信息
+        let mut proxy_info = ProxyNodeInfo::new(name, proxy_type.clone(), server, port);
+
+        // 根据代理类型解析特定字段
+        match proxy_type.as_str() {
+            "ss" | "shadowsocks" => {
+                let mut extra_info = serde_json::Map::new();
+
+                if let Some(cipher) = config.get("cipher").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "cipher".to_string(),
+                        serde_json::Value::String(cipher.to_string()),
+                    );
+                }
+                if let Some(password) = config.get("password").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "password".to_string(),
+                        serde_json::Value::String(password.to_string()),
+                    );
+                }
+                if let Some(plugin) = config.get("plugin").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "plugin".to_string(),
+                        serde_json::Value::String(plugin.to_string()),
+                    );
+                }
+                if let Some(plugin_opts) = config.get("plugin-opts").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "plugin_opts".to_string(),
+                        serde_json::Value::String(plugin_opts.to_string()),
+                    );
+                }
+
+                if !extra_info.is_empty() {
+                    proxy_info = proxy_info.with_extra_info(serde_json::Value::Object(extra_info));
+                }
+            }
+
+            "vmess" => {
+                let mut extra_info = serde_json::Map::new();
+
+                if let Some(uuid) = config.get("uuid").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "uuid".to_string(),
+                        serde_json::Value::String(uuid.to_string()),
+                    );
+                }
+                if let Some(cipher) = config.get("cipher").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "cipher".to_string(),
+                        serde_json::Value::String(cipher.to_string()),
+                    );
+                }
+                if let Some(tls) = config.get("tls").and_then(|v| v.as_bool()) {
+                    extra_info.insert("tls".to_string(), serde_json::Value::Bool(tls));
+                }
+                if let Some(sni) = config
+                    .get("sni")
+                    .or_else(|| config.get("servername"))
+                    .and_then(|v| v.as_str())
+                {
+                    extra_info.insert(
+                        "sni".to_string(),
+                        serde_json::Value::String(sni.to_string()),
+                    );
+                }
+                if let Some(network) = config.get("network").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "network".to_string(),
+                        serde_json::Value::String(network.to_string()),
+                    );
+                }
+
+                // 解析WebSocket选项
+                if let Some(ws_opts) = config.get("ws-opts") {
+                    if let Some(path) = ws_opts.get("path") {
+                        if let Some(path_str) = path.as_str() {
+                            proxy_info
+                                .extra_params
+                                .insert("ws_path".to_string(), path_str.to_string());
+                        }
+                    }
+                }
+
+                // 解析额外参数
+                if let Some(alter_id) = config.get("alterId") {
+                    if let Some(id) = alter_id.as_u64() {
+                        extra_info.insert(
+                            "alter_id".to_string(),
+                            serde_json::Value::Number(serde_json::Number::from(id)),
+                        );
+                    }
+                }
+
+                // 解析ws-opts等额外设置
+                if let Some(ws_opts) = config.get("ws-opts") {
+                    if let Some(ws_opts_map) = ws_opts.as_mapping() {
+                        let mut ws_info = serde_json::Map::new();
+                        for (key, value) in ws_opts_map {
+                            if let Some(key_str) = key.as_str() {
+                                if let Some(value_str) = value.as_str() {
+                                    ws_info.insert(
+                                        key_str.to_string(),
+                                        serde_json::Value::String(value_str.to_string()),
+                                    );
+                                }
+                            }
+                        }
+                        if !ws_info.is_empty() {
+                            extra_info
+                                .insert("ws_opts".to_string(), serde_json::Value::Object(ws_info));
+                        }
+                    }
+                }
+
+                if !extra_info.is_empty() {
+                    proxy_info = proxy_info.with_extra_info(serde_json::Value::Object(extra_info));
+                }
+            }
+
+            "vless" => {
+                let mut extra_info = serde_json::Map::new();
+
+                if let Some(uuid) = config.get("uuid").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "uuid".to_string(),
+                        serde_json::Value::String(uuid.to_string()),
+                    );
+                }
+                if let Some(tls) = config.get("tls").and_then(|v| v.as_bool()) {
+                    extra_info.insert("tls".to_string(), serde_json::Value::Bool(tls));
+                }
+                if let Some(sni) = config
+                    .get("sni")
+                    .or_else(|| config.get("servername"))
+                    .and_then(|v| v.as_str())
+                {
+                    extra_info.insert(
+                        "sni".to_string(),
+                        serde_json::Value::String(sni.to_string()),
+                    );
+                }
+                if let Some(network) = config.get("network").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "network".to_string(),
+                        serde_json::Value::String(network.to_string()),
+                    );
+                }
+
+                // 解析流设置
+                if let Some(flow) = config.get("flow").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "flow".to_string(),
+                        serde_json::Value::String(flow.to_string()),
+                    );
+                }
+
+                // 解析ws-opts等额外设置
+                if let Some(ws_opts) = config.get("ws-opts") {
+                    if let Some(ws_opts_map) = ws_opts.as_mapping() {
+                        let mut ws_info = serde_json::Map::new();
+                        for (key, value) in ws_opts_map {
+                            if let Some(key_str) = key.as_str() {
+                                if let Some(value_str) = value.as_str() {
+                                    ws_info.insert(
+                                        key_str.to_string(),
+                                        serde_json::Value::String(value_str.to_string()),
+                                    );
+                                }
+                            }
+                        }
+                        if !ws_info.is_empty() {
+                            extra_info
+                                .insert("ws_opts".to_string(), serde_json::Value::Object(ws_info));
+                        }
+                    }
+                }
+
+                if !extra_info.is_empty() {
+                    proxy_info = proxy_info.with_extra_info(serde_json::Value::Object(extra_info));
+                }
+            }
+
+            "trojan" => {
+                let mut extra_info = serde_json::Map::new();
+
+                if let Some(password) = config.get("password").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "password".to_string(),
+                        serde_json::Value::String(password.to_string()),
+                    );
+                }
+                if let Some(tls) = config.get("tls").and_then(|v| v.as_bool()) {
+                    extra_info.insert("tls".to_string(), serde_json::Value::Bool(tls));
+                }
+                if let Some(sni) = config
+                    .get("sni")
+                    .or_else(|| config.get("servername"))
+                    .and_then(|v| v.as_str())
+                {
+                    extra_info.insert(
+                        "sni".to_string(),
+                        serde_json::Value::String(sni.to_string()),
+                    );
+                }
+
+                // 解析ALPN设置
+                if let Some(alpn) = config.get("alpn") {
+                    if let Some(alpn_list) = alpn.as_sequence() {
+                        let alpn_values: Vec<serde_json::Value> = alpn_list
+                            .iter()
+                            .filter_map(|v| {
+                                v.as_str().map(|s| serde_json::Value::String(s.to_string()))
+                            })
+                            .collect();
+                        if !alpn_values.is_empty() {
+                            extra_info
+                                .insert("alpn".to_string(), serde_json::Value::Array(alpn_values));
+                        }
+                    }
+                }
+
+                if !extra_info.is_empty() {
+                    proxy_info = proxy_info.with_extra_info(serde_json::Value::Object(extra_info));
+                }
+            }
+
+            "http" | "https" => {
+                let mut extra_info = serde_json::Map::new();
+
+                if let Some(username) = config.get("username").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "username".to_string(),
+                        serde_json::Value::String(username.to_string()),
+                    );
+                }
+                if let Some(password) = config.get("password").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "password".to_string(),
+                        serde_json::Value::String(password.to_string()),
+                    );
+                }
+                extra_info.insert(
+                    "tls".to_string(),
+                    serde_json::Value::Bool(proxy_type == "https"),
+                );
+
+                if !extra_info.is_empty() {
+                    proxy_info = proxy_info.with_extra_info(serde_json::Value::Object(extra_info));
+                }
+            }
+
+            "socks5" => {
+                let mut extra_info = serde_json::Map::new();
+
+                if let Some(username) = config.get("username").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "username".to_string(),
+                        serde_json::Value::String(username.to_string()),
+                    );
+                }
+                if let Some(password) = config.get("password").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "password".to_string(),
+                        serde_json::Value::String(password.to_string()),
+                    );
+                }
+
+                if !extra_info.is_empty() {
+                    proxy_info = proxy_info.with_extra_info(serde_json::Value::Object(extra_info));
+                }
+            }
+
+            "hysteria" | "hysteria2" => {
+                let mut extra_info = serde_json::Map::new();
+
+                if let Some(password) = config
+                    .get("password")
+                    .or_else(|| config.get("auth"))
+                    .and_then(|v| v.as_str())
+                {
+                    extra_info.insert(
+                        "password".to_string(),
+                        serde_json::Value::String(password.to_string()),
+                    );
+                }
+
+                // 解析Hysteria特定参数
+                if let Some(protocol) = config.get("protocol").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "protocol".to_string(),
+                        serde_json::Value::String(protocol.to_string()),
+                    );
+                }
+
+                if let Some(obfs) = config.get("obfs").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "obfs".to_string(),
+                        serde_json::Value::String(obfs.to_string()),
+                    );
+                }
+
+                if !extra_info.is_empty() {
+                    proxy_info = proxy_info.with_extra_info(serde_json::Value::Object(extra_info));
+                }
+            }
+
+            "tuic" => {
+                let mut extra_info = serde_json::Map::new();
+
+                if let Some(password) = config.get("password").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "password".to_string(),
+                        serde_json::Value::String(password.to_string()),
+                    );
+                }
+
+                if let Some(uuid) = config.get("uuid").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "uuid".to_string(),
+                        serde_json::Value::String(uuid.to_string()),
+                    );
+                }
+
+                if !extra_info.is_empty() {
+                    proxy_info = proxy_info.with_extra_info(serde_json::Value::Object(extra_info));
+                }
+            }
+
+            "wireguard" | "wg" => {
+                let mut extra_info = serde_json::Map::new();
+
+                if let Some(private_key) = config.get("private-key").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "private_key".to_string(),
+                        serde_json::Value::String(private_key.to_string()),
+                    );
+                }
+
+                if let Some(dns) = config.get("dns").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "dns".to_string(),
+                        serde_json::Value::String(dns.to_string()),
+                    );
+                }
+
+                if !extra_info.is_empty() {
+                    proxy_info = proxy_info.with_extra_info(serde_json::Value::Object(extra_info));
+                }
+            }
+
+            _ => {
+                // 对于其他协议，只解析基本字段
+                let mut extra_info = serde_json::Map::new();
+
+                if let Some(password) = config.get("password").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "password".to_string(),
+                        serde_json::Value::String(password.to_string()),
+                    );
+                }
+
+                if let Some(username) = config.get("username").and_then(|v| v.as_str()) {
+                    extra_info.insert(
+                        "username".to_string(),
+                        serde_json::Value::String(username.to_string()),
+                    );
+                }
+
+                if !extra_info.is_empty() {
+                    proxy_info = proxy_info.with_extra_info(serde_json::Value::Object(extra_info));
+                }
+            }
+        }
+
+        // 检查是否支持UDP
+        if let Some(udp) = config.get("udp").and_then(|v| v.as_bool()) {
+            proxy_info = proxy_info.with_udp_support(udp);
+        }
+
+        Some(proxy_info)
+    }
+
+    /// 解析代理提供者配置
+    fn parse_provider_proxies(
+        &self,
+        provider_name: &str,
+        config: &HashMap<String, Value>,
+    ) -> Option<Vec<ProxyNodeInfo>> {
+        // 这里简化处理，实际应用中需要根据provider类型（file/http）获取内容
+        // 然后解析内容中的代理配置
+
+        // 对于演示目的，返回空列表
+        // 实际实现应该：
+        // 1. 根据provider_type决定如何获取内容
+        // 2. 解析获取的内容（可能是YAML/JSON）
+        // 3. 提取代理配置
+
+        Some(Vec::new())
+    }
+
+    /// 从Clash配置提取代理组信息
+    pub fn extract_proxy_groups(&self, config: &ClashConfig) -> Result<Vec<ProxyGroup>> {
+        let mut groups = Vec::new();
+
+        if let Some(group_list) = &config.proxy_groups {
+            for group_config in group_list {
+                if let Ok(group) =
+                    serde_yaml::from_value::<ProxyGroup>(Value::Mapping(group_config.clone()))
+                {
+                    groups.push(group);
+                }
+            }
+        }
+
+        Ok(groups)
+    }
+
+    /// 从订阅链接解析代理配置
+    pub async fn parse_subscription(&self, url: &str) -> Result<Vec<ProxyNodeInfo>> {
+        // 下载订阅内容
+        let content = self.download_subscription(url).await?;
+
+        // 尝试多种解析方式
+        let proxies = self.parse_subscription_content(&content).await?;
+
+        Ok(proxies)
+    }
+
+    /// 下载订阅内容
+    async fn download_subscription(&self, url: &str) -> Result<String> {
+        use reqwest::Client;
+
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
+
+        let response = client
+            .get(url)
+            .header("User-Agent", "Clash/1.0")
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("订阅请求失败: {}", response.status()));
+        }
+
+        let bytes = response.bytes().await?;
+
+        // 尝试Base64解码（订阅内容通常是Base64编码的）
+        let content = match String::from_utf8(bytes.to_vec()) {
+            Ok(text) => text,
+            Err(_) => {
+                // 如果不是有效的UTF-8，尝试Base64解码
+                let decoded =
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &bytes)
+                        .map_err(|e| anyhow!("Base64解码失败: {}", e))?;
+                String::from_utf8_lossy(&decoded).to_string()
+            }
+        };
+
+        Ok(content)
+    }
+
+    /// 解析订阅内容
+    async fn parse_subscription_content(&self, content: &str) -> Result<Vec<ProxyNodeInfo>> {
+        let content = content.trim();
+
+        // 尝试解析为Clash配置
+        if let Ok(config) = self.parse_clash_config(content) {
+            return self.extract_proxy_nodes(&config);
+        }
+
+        // 尝试解析为代理链接列表（每行一个链接）
+        let mut proxies = Vec::new();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            // 尝试解析为代理链接
+            if let Ok(proxy_info) = self.parse_proxy_link(line) {
+                proxies.push(proxy_info);
+            }
+        }
+
+        if !proxies.is_empty() {
+            return Ok(proxies);
+        }
+
+        Err(anyhow!("无法解析订阅内容"))
+    }
+
+    /// 解析代理链接
+    fn parse_proxy_link(&self, link: &str) -> Result<ProxyNodeInfo> {
+        use url::Url;
+
+        let link = link.trim();
+
+        // 尝试解析为URL
+        if let Ok(url) = Url::parse(link) {
+            return self.parse_proxy_url(&url);
+        }
+
+        // 尝试解析为Base64编码的vmess链接
+        if link.starts_with("vmess://") {
+            return self.parse_vmess_link(link);
+        }
+
+        // 尝试解析为Base64编码的ss链接
+        if link.starts_with("ss://") {
+            return self.parse_shadowsocks_link(link);
+        }
+
+        // 尝试解析为其他格式
+        Err(anyhow!("无法解析代理链接: {}", link))
+    }
+
+    /// 解析代理URL
+    fn parse_proxy_url(&self, url: &Url) -> Result<ProxyNodeInfo> {
+        let scheme = url.scheme();
+        let host = url.host_str().ok_or_else(|| anyhow!("URL缺少主机"))?;
+        let port = url.port().unwrap_or(match scheme {
+            "http" => 80,
+            "https" => 443,
+            "socks5" => 1080,
+            "ss" => 8388,
+            _ => 0,
+        });
+
+        let mut proxy_info = ProxyNodeInfo {
+            name: url.fragment().unwrap_or(host).to_string(),
+            protocol: scheme.to_string(),
+            server: host.to_string(),
+            port,
+            ..Default::default()
+        };
+
+        // 解析认证信息
+        if let Some(password) = url.password() {
+            proxy_info.password = Some(password.to_string());
+        }
+        if let Some(username) = url.username() {
+            if !username.is_empty() {
+                proxy_info.username = Some(username.to_string());
+            }
+        }
+
+        // 解析查询参数
+        for (key, value) in url.query_pairs() {
+            match key.as_ref() {
+                "cipher" | "method" => proxy_info.cipher = Some(value.to_string()),
+                "uuid" | "id" => proxy_info.uuid = Some(value.to_string()),
+                "sni" | "servername" => proxy_info.sni = Some(value.to_string()),
+                "tls" => proxy_info.tls = Some(value == "true"),
+                "network" | "type" => proxy_info.network = Some(value.to_string()),
+                _ => {
+                    proxy_info
+                        .extra_params
+                        .insert(key.to_string(), value.to_string());
+                }
+            }
+        }
+
+        Ok(proxy_info)
+    }
+
+    /// 解析vmess链接
+    fn parse_vmess_link(&self, link: &str) -> Result<ProxyNodeInfo> {
+        // 移除vmess://前缀
+        let base64_str = link.trim_start_matches("vmess://");
+
+        // Base64解码
+        let decoded =
+            base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE, base64_str)
+                .map_err(|e| anyhow!("Base64解码失败: {}", e))?;
+
+        let json_str = String::from_utf8_lossy(&decoded);
+
+        // 解析JSON配置
+        let config: HashMap<String, Value> =
+            serde_json::from_str(&json_str).map_err(|e| anyhow!("JSON解析失败: {}", e))?;
+
+        // 转换为代理配置
+        let mut proxy_config = HashMap::new();
+        proxy_config.insert("type".to_string(), Value::String("vmess".to_string()));
+
+        // 映射字段
+        if let Some(ps) = config.get("ps") {
+            proxy_config.insert(
+                "name".to_string(),
+                Value::String(ps.as_str().unwrap_or("").to_string()),
+            );
+        }
+        if let Some(add) = config.get("add") {
+            proxy_config.insert(
+                "server".to_string(),
+                Value::String(add.as_str().unwrap_or("").to_string()),
+            );
+        }
+        if let Some(port) = config.get("port") {
+            if let Some(port_num) = port.as_u64() {
+                proxy_config.insert("port".to_string(), Value::Number(port_num.into()));
+            }
+        }
+        if let Some(id) = config.get("id") {
+            proxy_config.insert(
+                "uuid".to_string(),
+                Value::String(id.as_str().unwrap_or("").to_string()),
+            );
+        }
+        if let Some(aid) = config.get("aid") {
+            proxy_config.insert(
+                "alterId".to_string(),
+                Value::Number(aid.as_u64().unwrap_or(0).into()),
+            );
+        }
+        if let Some(cipher) = config.get("type") {
+            proxy_config.insert(
+                "cipher".to_string(),
+                Value::String(cipher.as_str().unwrap_or("auto").to_string()),
+            );
+        }
+        if let Some(net) = config.get("net") {
+            proxy_config.insert(
+                "network".to_string(),
+                Value::String(net.as_str().unwrap_or("").to_string()),
+            );
+        }
+        if let Some(tls) = config.get("tls") {
+            proxy_config.insert(
+                "tls".to_string(),
+                Value::String(tls.as_str().unwrap_or("").to_string()),
+            );
+        }
+        if let Some(sni) = config.get("sni") {
+            proxy_config.insert(
+                "sni".to_string(),
+                Value::String(sni.as_str().unwrap_or("").to_string()),
+            );
+        }
+
+        // 解析代理配置
+        self.parse_proxy_config(&proxy_config)
+            .ok_or_else(|| anyhow!("无法解析vmess配置"))
+    }
+
+    /// 解析shadowsocks链接
+    fn parse_shadowsocks_link(&self, link: &str) -> Result<ProxyNodeInfo> {
+        // 移除ss://前缀
+        let url_str = link.trim_start_matches("ss://");
+
+        // 解析URL
+        let url =
+            Url::parse(&format!("ss://{}", url_str)).map_err(|e| anyhow!("URL解析失败: {}", e))?;
+
+        self.parse_proxy_url(&url)
+    }
+
+    /// 生成Clash配置
+    pub fn generate_clash_config(
+        &self,
+        proxies: &[ProxyNodeInfo],
+        groups: Option<&[ProxyGroup]>,
+    ) -> Result<String> {
+        let mut config = HashMap::new();
+
+        // 添加代理配置
+        let proxy_configs: Vec<HashMap<String, Value>> = proxies
+            .iter()
+            .filter_map(|proxy| self.generate_proxy_config(proxy))
+            .collect();
+
+        if !proxy_configs.is_empty() {
+            config.insert(
+                "proxies".to_string(),
+                Value::Sequence(proxy_configs.into_iter().map(Value::Mapping).collect()),
+            );
+        }
+
+        // 添加代理组配置
+        if let Some(groups) = groups {
+            let group_configs: Vec<HashMap<String, Value>> = groups
+                .iter()
+                .map(|group| self.generate_group_config(group))
+                .collect();
+
+            if !group_configs.is_empty() {
+                config.insert(
+                    "proxy-groups".to_string(),
+                    Value::Sequence(group_configs.into_iter().map(Value::Mapping).collect()),
+                );
+            }
+        }
+
+        // 添加基本配置
+        config.insert("port".to_string(), Value::Number(7890.into()));
+        config.insert("socks-port".to_string(), Value::Number(7891.into()));
+        config.insert("mode".to_string(), Value::String("rule".to_string()));
+        config.insert("log-level".to_string(), Value::String("info".to_string()));
+
+        // 转换为YAML
+        let yaml = serde_yaml::to_string(&config).map_err(|e| anyhow!("YAML生成失败: {}", e))?;
+
+        Ok(yaml)
+    }
+
+    /// 生成代理配置
+    fn generate_proxy_config(&self, proxy: &ProxyNodeInfo) -> Option<HashMap<String, Value>> {
+        let mut config = HashMap::new();
+
+        config.insert("name".to_string(), Value::String(proxy.name.clone()));
+        config.insert("type".to_string(), Value::String(proxy.protocol.clone()));
+        config.insert("server".to_string(), Value::String(proxy.server.clone()));
+        config.insert("port".to_string(), Value::Number(proxy.port.into()));
+
+        // 根据协议类型添加特定字段
+        match proxy.protocol.to_lowercase().as_str() {
+            "ss" | "shadowsocks" => {
+                if let Some(cipher) = &proxy.cipher {
+                    config.insert("cipher".to_string(), Value::String(cipher.clone()));
+                }
+                if let Some(password) = &proxy.password {
+                    config.insert("password".to_string(), Value::String(password.clone()));
+                }
+            }
+            "vmess" => {
+                if let Some(uuid) = &proxy.uuid {
+                    config.insert("uuid".to_string(), Value::String(uuid.clone()));
+                }
+                if let Some(cipher) = &proxy.cipher {
+                    config.insert("cipher".to_string(), Value::String(cipher.clone()));
+                }
+                if let Some(tls) = proxy.tls {
+                    config.insert("tls".to_string(), Value::Bool(tls));
+                }
+                if let Some(sni) = &proxy.sni {
+                    config.insert("sni".to_string(), Value::String(sni.clone()));
+                }
+                if let Some(network) = &proxy.network {
+                    config.insert("network".to_string(), Value::String(network.clone()));
+                }
+            }
+            "trojan" => {
+                if let Some(password) = &proxy.password {
+                    config.insert("password".to_string(), Value::String(password.clone()));
+                }
+                if let Some(tls) = proxy.tls {
+                    config.insert("tls".to_string(), Value::Bool(tls));
+                }
+                if let Some(sni) = &proxy.sni {
+                    config.insert("sni".to_string(), Value::String(sni.clone()));
+                }
+            }
+            "http" | "https" => {
+                if let Some(username) = &proxy.username {
+                    config.insert("username".to_string(), Value::String(username.clone()));
+                }
+                if let Some(password) = &proxy.password {
+                    config.insert("password".to_string(), Value::String(password.clone()));
+                }
+                config.insert("tls".to_string(), Value::Bool(proxy.protocol == "https"));
+            }
+            "socks5" => {
+                if let Some(username) = &proxy.username {
+                    config.insert("username".to_string(), Value::String(username.clone()));
+                }
+                if let Some(password) = &proxy.password {
+                    config.insert("password".to_string(), Value::String(password.clone()));
+                }
+            }
+            _ => {
+                // 通用字段
+                if let Some(password) = &proxy.password {
+                    config.insert("password".to_string(), Value::String(password.clone()));
+                }
+                if let Some(uuid) = &proxy.uuid {
+                    config.insert("uuid".to_string(), Value::String(uuid.clone()));
+                }
+                if let Some(cipher) = &proxy.cipher {
+                    config.insert("cipher".to_string(), Value::String(cipher.clone()));
+                }
+                if let Some(tls) = proxy.tls {
+                    config.insert("tls".to_string(), Value::Bool(tls));
+                }
+                if let Some(sni) = &proxy.sni {
+                    config.insert("sni".to_string(), Value::String(sni.clone()));
+                }
+            }
+        }
+
+        // 添加UDP支持
+        if let Some(udp) = proxy.extra_params.get("udp") {
+            if let Ok(udp_bool) = udp.parse::<bool>() {
+                config.insert("udp".to_string(), Value::Bool(udp_bool));
+            }
+        }
+
+        Some(config)
+    }
+
+    /// 生成代理组配置
+    fn generate_group_config(&self, group: &ProxyGroup) -> HashMap<String, Value> {
+        let mut config = HashMap::new();
+
+        config.insert("name".to_string(), Value::String(group.name.clone()));
+
+        let type_str = match &group.group_type {
+            ProxyGroupType::Select => "select",
+            ProxyGroupType::UrlTest => "url-test",
+            ProxyGroupType::Fallback => "fallback",
+            ProxyGroupType::LoadBalance => "load-balance",
+            ProxyGroupType::Relay => "relay",
+            ProxyGroupType::Other(other) => other.as_str(),
+        };
+        config.insert("type".to_string(), Value::String(type_str.to_string()));
+
+        config.insert(
+            "proxies".to_string(),
+            Value::Sequence(
+                group
+                    .proxies
+                    .iter()
+                    .map(|p| Value::String(p.clone()))
+                    .collect(),
+            ),
+        );
+
+        if let Some(url) = &group.url {
+            config.insert("url".to_string(), Value::String(url.clone()));
+        }
+
+        if let Some(interval) = group.interval {
+            config.insert("interval".to_string(), Value::Number(interval.into()));
+        }
+
+        if let Some(strategy) = &group.strategy {
+            config.insert("strategy".to_string(), Value::String(strategy.clone()));
+        }
+
+        if let Some(use_list) = &group.r#use {
+            config.insert(
+                "use".to_string(),
+                Value::Sequence(use_list.iter().map(|u| Value::String(u.clone())).collect()),
+            );
+        }
+
+        config
+    }
+}
